@@ -1,14 +1,19 @@
+import logging
 import socket
 import sys
-from binascii import unhexlify, hexlify
 from base64 import b64decode, b64encode
+from binascii import hexlify, unhexlify
+import json
 
+import requests
 from Crypto.Cipher import AES
 from Crypto.Hash import CMAC, SHA256
 from Crypto.PublicKey import ECC
 from Crypto.Signature import DSS
+from urllib.parse import unquote
 from hexdump import hexdump
-import requests
+
+logging.basicConfig(level=logging.DEBUG)
 
 # config
 VERBOSE = True
@@ -28,6 +33,10 @@ SERVICE_PRIVATE_KEY = int.from_bytes(
     b'\x90\xe7\x6c\xbb\x2d\x52\xa1\xce\x3b\x66\xde\x11\x43\x9c\x87\xec\x1f\x86\x6a\x3b\x65\xb6\xae\xea\xad\x57\x34\x53\xd1\x03\x8c\x01',
     'little'
 )
+
+
+def pretty_print_dict(banner, obj):
+    print(banner, json.dumps(dict(**obj), indent=2))
 
 
 class IntelAttestationService:
@@ -61,6 +70,19 @@ class IntelAttestationService:
             print(request_id, description)
             sys.exit(status_code)
 
+    def _handle_401_500_503(self, rsp, banner):
+        self._exit_handler(
+            rsp, 401, '{}: Failed to authenticate or authorize request.'.format(
+                banner)
+        )
+        self._exit_handler(
+            rsp, 500, '{}: Internal error occurred.'.format(banner)
+        )
+        self._exit_handler(
+            rsp, 503, '{}: Service is currently not able to process the request.'.format(
+                banner)
+        )
+
     def retrieve_sigrl(self, epid_group_id):
         gid = int(epid_group_id).to_bytes(4, 'big')
         url = self.API_SIGRL.format(gid=hexlify(gid).decode('ascii'))
@@ -70,23 +92,15 @@ class IntelAttestationService:
         request_id = rsp.headers.get('Request-ID')
         if VERBOSE:
             print('')
-            print(rsp.request.headers)
-            print(rsp.headers)
+            pretty_print_dict('request.headers', rsp.request.headers)
+            pretty_print_dict('response.headers', rsp.headers)
 
         if rsp.status_code == 401:
             print(request_id, 's: Failed to authenticate or authorize request.')
             rsp = self.session.get(url, headers=self._h(False, False))
             request_id = rsp.headers.get('Request-ID')
 
-        self._exit_handler(
-            rsp, 401, 's: Failed to authenticate or authorize request.'
-        )
-        self._exit_handler(
-            rsp, 500, 's: Internal error occurred.'
-        )
-        self._exit_handler(
-            rsp, 503, 's: Service is currently not able to process the request.'
-        )
+        self._handle_401_500_503(rsp, 's')
 
         if rsp.status_code == 404:
             print(
@@ -112,12 +126,13 @@ class IntelAttestationService:
         if nonce:
             payload['nonce'] = nonce
 
-        rsp = self.session.get(self.API_REPORT, headers=self._h(True, True))
+        rsp = self.session.post(
+            self.API_REPORT, json=payload, headers=self._h(True, True))
         request_id = rsp.headers.get('Request-ID')
         if VERBOSE:
             print('')
-            print(rsp.request.headers)
-            print(rsp.headers)
+            pretty_print_dict('request.headers', rsp.request.headers)
+            pretty_print_dict('response.headers', rsp.headers)
 
         if rsp.status_code == 401:
             print(request_id, 'Failed to authenticate or authorize request.')
@@ -128,22 +143,15 @@ class IntelAttestationService:
         self._exit_handler(
             rsp, 400, 'v: Invalid Attestation Evidence Payload.'
         )
-        self._exit_handler(
-            rsp, 401, 'v: Failed to authenticate or authorize request.'
-        )
-        self._exit_handler(
-            rsp, 500, 'v: Internal error occurred.'
-        )
-        self._exit_handler(
-            rsp, 503, 'v: Service is currently not able to process the request.'
-        )
+
+        self._handle_401_500_503(rsp, 'v')
 
         if rsp.status_code != 200:
             print(request_id, 'v: Unexpected Error: {}'.format(rsp.status_code))
             sys.exit(rsp.status_code)
 
         report_signature = b64decode(rsp.headers['X-IASReport-Signature'])
-        cert_chain = rsp.headers['X-IASReport-Signing-Certificate']
+        cert_chain = unquote(rsp.headers['X-IASReport-Signing-Certificate'])
         advisory_url = rsp.headers.get('Advisory-URL')
         advisory_ids = rsp.headers.get('Advisory-IDs')
 
@@ -167,9 +175,9 @@ def generate_seed(literal):
 def recv_bytes(client, size):
     data = client.recv(size*2)
 
-    if VERBOSE:
-        print('')
-        hexdump(data)
+    # if VERBOSE:
+    #     print('')
+    #     hexdump(data)
 
     return unhexlify(data)
 
@@ -192,26 +200,9 @@ def recv_msg1(client):
     return Ga, epid_group_id
 
 
-def multiply(a, G):
-    base = G
-    result = G.point_at_infinity()
-
-    while a > 1:
-        if a & 1 == 1:
-            result += base
-
-        a = a >> 1
-        base = base.double()
-
-    if a == 1:
-        result += base
-
-    return result
-
-
 def derive_shared_key(Ga_point: ECC.EccPoint, Gb_k):
     # shared_secret = (Gb_k*Ga_point).point_x.to_bytes(32, 'little')
-    shared_point = multiply(Gb_k, Ga_point)
+    shared_point = Ga_point * Gb_k
     shared_secret = int(shared_point.x).to_bytes(32, 'little')
     cmac_key = b'\x00'*16
     kdk = CMAC.new(cmac_key, msg=shared_secret, ciphermod=AES).digest()
@@ -230,8 +221,6 @@ def send_msg2(client, epid_group_id, Ga_point, Gb, smk):
     Gb_ser = ec_point_serialize(Gb.pointQ)
 
     # build A
-    # msg = Gb_ser
-    # msg += SPID
     Quote_Type = int(QUOTE_TYPE_UNLINKABLE).to_bytes(2, 'little')  # Quote_Type
     KDF_ID = int(1).to_bytes(2, 'little')  # KDF_ID
 
@@ -290,6 +279,10 @@ def recv_msg3_verify(client, Ga_point: ECC.EccPoint, Gb_point: ECC.EccPoint, smk
     Gb_ser = ec_point_serialize(Gb_point)
 
     # receive
+
+    # skip a byte
+    client.recv(1)
+
     mac = recv_bytes(client, 16)
 
     M = recv_bytes(client, 32+32+256+436)
@@ -307,14 +300,20 @@ def recv_msg3_verify(client, Ga_point: ECC.EccPoint, Gb_point: ECC.EccPoint, smk
 
     quote = M[32+32+256:]
     report_body = quote[48:432]
+    report_data = report_body[320:]
 
-    header = report_body[:32]
-    keyhash = SHA256.new(b''.join([Ga_ser, Gb_ser, generate_seed('VK')]))
+    VK = CMAC.new(kdk, msg=generate_seed('VK'), ciphermod=AES)
+    keyhash = SHA256.new(b''.join([Ga_ser, Gb_ser, VK.digest()])).digest()
 
-    if header != keyhash.digest():
+    if report_data[:32] != keyhash:
+        print('>>> First 32-bytes of the report data')
+        hexdump(report_data[:32])
+        print('>>> SHA256(Ga||Gb||VK)')
+        hexdump(keyhash)
         return False, "Step3: Key Hash doesn't match"
 
     if VERBOSE:
+        print('>>> quote')
         hexdump(quote)
 
     return True, quote
@@ -341,13 +340,16 @@ def main(client, ias):
     print('Msg2 Sent')
 
     # recv msg3
+    print('Receving Msg3')
     verif, payload = recv_msg3_verify(client, Ga.pointQ, Gb.pointQ, smk, kdk)
     if not verif:
         print('Fail to verify Msg3', payload)
         sys.exit(-1)
 
-    meta, rsp = ias.verify_attestation_evidence(payload)
+    meta, report = ias.verify_attestation_evidence(payload)
     (request_id, report_signature, cert_chain, advisory_url, advisory_ids) = meta
+
+    pretty_print_dict('report', report)
 
     # FIXME: Validate the signing certificate received in the report response.
     # FIXME: Validate the report signature using the signing certificate.
