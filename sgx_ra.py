@@ -86,7 +86,7 @@ class RemoteAttestation:
         self.ias = ias
         self.sim = sim
 
-    def receive_msg1(self, msg: bytes):
+    def receive_msg1(self, msg: bytes) -> bytes:
         io = BytesIO(msg)
         Gax = io.read(32)
         Gay = io.read(32)
@@ -100,6 +100,7 @@ class RemoteAttestation:
 
         self.epid_group_id = _load_int(gid)
         self._handle_msg1_msg2()
+        return self._generate_msg2()
 
     def _handle_msg1_msg2(self):
         # Generate local key pair
@@ -113,7 +114,7 @@ class RemoteAttestation:
         self.kdk = _aes_cmac(key=cmac_key, msg=shared_secret)
         self.smk = _aes_cmac(key=self.kdk, msg=self.SEED_SMK)
 
-    def generate_msg2(self) -> bytes:
+    def _generate_msg2(self) -> bytes:
         # serialize Ga, Gb
         Ga_ser = _serialize_ec_point(self.Ga.pointQ)
         Gb_ser = _serialize_ec_point(self.Gb.pointQ)
