@@ -1,0 +1,1 @@
+add_library(sgx_utils search_shared_library.cpp)

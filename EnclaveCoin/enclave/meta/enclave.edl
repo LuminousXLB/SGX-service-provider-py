@@ -1,0 +1,52 @@
+/*
+
+Copyright 2018 Intel Corporation
+
+This software and the related documents are Intel copyrighted materials,
+and your use of them is governed by the express license under which they
+were provided to you (License). Unless the License provides otherwise,
+you may not use, modify, copy, publish, distribute, disclose or transmit
+this software or the related documents without Intel's prior written
+permission.
+
+This software and the related documents are provided as is, with no
+express or implied warranties, other than those that are expressly stated
+in the License.
+
+*/
+
+enclave {
+	include "stdbool.h"
+    include "sgx_trts.h"
+	include "sgx_utils.h"
+	include "sgx_tkey_exchange.h"
+
+	from "sgx_tkey_exchange.edl" import *;
+
+	trusted {
+/*
+		public sgx_status_t get_report([out] sgx_report_t *report,
+			[in] sgx_target_info_t *target_info);
+
+		public sgx_status_t enclave_ra_init(sgx_ec256_public_t key, int b_pse,
+			[out] sgx_ra_context_t *ctx, [out] sgx_status_t *pse_status);
+*/
+		public sgx_status_t enclave_ra_init_def([out] sgx_ra_context_t *ctx);
+
+		public sgx_status_t enclave_ra_get_key_hash(
+			[out] sgx_status_t *get_keys_status, sgx_ra_context_t ctx,
+			sgx_ra_key_type_t type, [out] sgx_sha256_hash_t *hash);
+
+		public sgx_status_t enclave_ra_close(sgx_ra_context_t ctx);
+
+        public sgx_status_t ecall_coin_tossing([out] uint32_t *output, sgx_ra_context_t ctx,
+                              [in, size=iv_len] uint8_t *iv, uint32_t iv_len,
+                              [in, size=ct_len] uint8_t *ct, uint32_t ct_len,
+                              [in] uint8_t tag[16], uint32_t coin);
+	};
+
+	untrusted {
+	    void ocall_puts([in, string] const char *str);
+	};
+};
+
